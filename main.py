@@ -13,9 +13,9 @@ from datetime import datetime
 
 converter = opencc.OpenCC('t2s')  # 设置繁简转化
 
-qb_url = 'http://qbittorrent.home.makuro.cn:8082'  # qBittorrent Web UI的URL
-username = 'makuro'  # qBittorrent Web UI的用户名
-password = 'SRCak2244@'  # qBittorrent Web UI的密码
+qb_url = 'qb_url'  # qBittorrent Web UI的URL
+username = 'username'  # qBittorrent Web UI的用户名
+password = 'password'  # qBittorrent Web UI的密码
 proxies = {
     'http': 'http://172.16.1.10:10811',
     'https': 'http://172.16.1.10:10811'
