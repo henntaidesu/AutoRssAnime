@@ -9,11 +9,11 @@ import re
 import threading
 from sqlite3 import IntegrityError, OperationalError
 from datetime import datetime
-
+import pymysql
 
 converter = opencc.OpenCC('t2s')  # 设置繁简转化
 
-qb_url = 'qb_url'  # qBittorrent Web UI的URL
+qb_url = 'http://qbittorrent.home.makuro.cn:8082'  # qBittorrent Web UI的URL
 username = 'username'  # qBittorrent Web UI的用户名
 password = 'password'  # qBittorrent Web UI的密码
 proxies = {
@@ -24,6 +24,11 @@ down_path = "/qbittorrent/anime/data/Anime"
 log_path = "/qbittorrent/anime/autoRss/log"
 stop_time = 1200  # 每次获取RSS间隔 单位秒
 
+mysql_host = '172.16.1.22'
+mysql_port = 3306
+mysql_user = 'makuro'
+mysql_password = 'SRCak2244@'
+mysql_database = 'autoRss'
 
 def now_time():
     Time = time.time()
@@ -46,7 +51,7 @@ class Log:
         self.log_level = 'debug'
 
     def setup_logger(self):
-        log_file = f"{log_path}/{self.day}.log"
+        log_file = f"log/{self.day}.log"
         # 创建一个logger对象
         logger = logging.getLogger("my_logger")
         logger.setLevel(logging.DEBUG)
@@ -105,35 +110,69 @@ class Log:
 
 class DB:
     def __init__(self):
-        self.conn = sqlite3.connect('db.db')
-        self.cursor = self.conn.cursor()
+        self.db = pymysql.connect(host=mysql_host, port=mysql_port, user=mysql_user,
+                                  password=mysql_password, database=mysql_database)
+        self.logger = Log()
 
-    def select(self, sql):
-        self.cursor.execute(sql)
-        rows = self.cursor.fetchall()
-        self.cursor.close()
-        self.conn.close()
-        return rows
+    @staticmethod
+    def TR_sql(sql):
+        return sql.replace("'None'", "NULL")
 
     def insert(self, sql):
         try:
-            self.cursor.execute(sql)
-            self.conn.commit()
-        except IntegrityError or OperationalError:
+            sql = self.TR_sql(sql)
+            cursor = self.db.cursor()
+            cursor.execute(sql)
+            self.db.commit()
+            self.db.close()
+            return True
+        except Exception as e:
+            if "PRIMARY" in str(e):
+                # self.print_log.write_log(f"重复数据", 'info')
+                return False
+            elif "timed out" in str(e):
+                self.logger.write_log("连接数据库超时", 'error')
+            else:
+                self.logger.write_log(f"错误 {sql}", 'error')
+                return False
+
+    def update(self, sql):
+        try:
+            sql = self.TR_sql(sql)
+            cursor = self.db.cursor()
+            cursor.execute(sql)
+            self.db.commit()
+            cursor.close()
+            return True
+        except Exception as e:
+            if "timed out" in str(e):
+                self.logger.write_log("连接数据库超时", 'error')
+            elif "PRIMARY" in str(e):
+                # self.print_log.write_log(f"重复数据", 'info')
+                return '重复数据'
+            else:
+                self.logger.write_log(f'{sql}', 'error')
             return False
-        self.cursor.close()
-        self.conn.close()
-        return True
+        finally:
+            if hasattr(self, 'db') and self.db:
+                self.db.close()
 
-    def delete(self, sql):
-        self.cursor.close()
-        self.conn.close()
-
-    def updata(self, sql):
-        self.cursor.execute(sql)
-        self.conn.commit()
-        self.cursor.close()
-        self.conn.close()
+    def select(self, sql):
+        try:
+            sql = self.TR_sql(sql)
+            cursor = self.db.cursor()
+            cursor.execute(sql)
+            result = cursor.fetchall()
+            cursor.close()
+            return True, result
+        except Exception as e:
+            if "timed out" in str(e):
+                self.logger.write_log("连接数据库超时", 'error')
+            else:
+                self.logger.write_log(f'{sql}', 'error')
+        finally:
+            if hasattr(self, 'db') and self.db:
+                self.db.close()
 
 
 class qbittorrent:
@@ -195,8 +234,7 @@ class qbittorrent:
 
 
 def nyaa_ANI_torrent():
-    res_url = DB().select("SELECT rss_url FROM rss_url WHERE rss_name = 'ani'")[0][0]
-
+    res_url = 'https://nyaa.si/?page=rss&u=ANiTorrent'
     response = requests.get(res_url, proxies=proxies)
     feed_content = response.content
 
@@ -217,8 +255,9 @@ def nyaa_ANI_torrent():
         else:
             title = torrent_title[:torrent_title.find('-') - 1]
             title = title[title.find(']') + 1:].replace(' ', '')
-        number_of_words = torrent_title[torrent_title.find('-'):]
-        number_of_words = number_of_words[:number_of_words.find('[')].replace('-', '').replace(' ', '')
+
+        number_of_words = re.sub(r'\[[^\]]*\]', '', torrent_title)
+        number_of_words = int(number_of_words[number_of_words.rfind('-') + 1:].lstrip().rstrip())
 
         anime_title = converter.convert(title)
 
@@ -286,12 +325,12 @@ def nyaa_ANI_torrent():
 
             quarter = f"{year}{month}"
 
-            sql = f'''INSERT INTO "main"."anime_quarter" ("anime_name", "quarter") VALUES ('{anime_title}', '{quarter}');'''
+            sql = f'''INSERT INTO `anime_quarter` (`anime_name`, `quarter`) VALUES ('{anime_title}', '{quarter}');'''
             DB().insert(sql)
 
-        sql = f'''INSERT INTO "main"."rss_torrent" 
-        ("rss_group", "torrent_url", "anime_title", "number_of_words", "status", "season", "release_time", "torrent_from")
-         VALUES ('ANI', '{torrent_url}', '{anime_title}', '{number_of_words}', 0, {season}, '{release_time}', 'nyaa');'''
+        sql = f'''INSERT INTO `rss_torrent`
+        (`rss_group`, `torrent_url`, `anime_title`, `number_of_words`, `status`, `season`, `release_time`, `torrent_from`)
+         VALUES ('ANI', '{torrent_url}', '{anime_title}', {number_of_words}, 0, {season}, '{release_time}', 'nyaa');'''
         if DB().insert(sql):
             Log().write_log(f'已更新订阅 - ANI - {anime_title} - 第{season}季 - 第{number_of_words}集', 'info')
             auto_download(torrent_url, 'nyaa', anime_title, number_of_words, season)
@@ -300,46 +339,59 @@ def nyaa_ANI_torrent():
             return False
 
 
-def auto_download(torrent_id, torrent_from, anime_title, number_of_words, season):
-    # sql = f"SELECT * FROM rss_torrent WHERE status = '0'"
-    # data = DB().select(sql)
-    # for i in data:
-    #     print(i)
-    #     torrent_id = i[1]
-    #     torrent_from = i[2]
-    #     anime_title = i[3]
-    #     number_of_words = i[4]
-    #     season = i[6]
+# def auto_download(torrent_id, torrent_from, anime_title, number_of_words, season):
+def auto_download():
+    sql = f"SELECT * FROM rss_torrent WHERE status = '0'"
+    flag, data = DB().select(sql)
+    for i in data:
+        print(i)
+        torrent_id = i[1]
+        torrent_from = i[2]
+        anime_title = i[3]
+        number_of_words = i[4]
+        season = i[6]
 
-    sql = f'''SELECT quarter FROM "anime_quarter" WHERE anime_name = "{anime_title}"'''
-    quarter = DB().select(sql)
-    if quarter:
-        quarter = quarter[0][0]
-        if torrent_from == 'nyaa':
-            torrent_url = f'''https://nyaa.si/download/{torrent_id}.torrent'''
-        save_path = f"{down_path}/{quarter}/{anime_title}/Season {season}"
+        sql = f'''SELECT quarter FROM `anime_quarter` WHERE anime_name = "{anime_title}"'''
+        flag, quarter = DB().select(sql)
+        if quarter:
+            quarter = quarter[0][0]
+            if torrent_from == 'nyaa':
+                torrent_url = f'''https://nyaa.si/download/{torrent_id}.torrent'''
+            save_path = f"{down_path}/{quarter}/{anime_title}/Season {season}"
 
-        response = requests.get(torrent_url, proxies=proxies)
-        torrent_file = f'torrent/{torrent_id}.torrent'
-        with open(torrent_file, 'wb') as f:
-            f.write(response.content)
+            response = requests.get(torrent_url, proxies=proxies)
+            torrent_file = f'torrent/{torrent_id}.torrent'
+            with open(torrent_file, 'wb') as f:
+                f.write(response.content)
 
-        if qbittorrent().add_torrent(save_path, torrent_file, quarter):
-            # Log().write_log(f'添加QB成功 - {anime_title} - 第{season}季 - 第{number_of_words}集', 'info')
-            sql = f'''UPDATE "main"."rss_torrent" SET  "status" = '1' WHERE "torrent_url" = '{torrent_id}';'''
-            DB().updata(sql)
-        os.remove(torrent_file)
-    else:
-        Log().write_log(f'无匹配 - {anime_title} - 第{season}季 - 第{number_of_words}集', 'warning')
+            if qbittorrent().add_torrent(save_path, torrent_file, quarter):
+                Log().write_log(f'添加QB成功 - {anime_title} - 第{season}季 - 第{number_of_words}集', 'info')
+                sql = f'''UPDATE `rss_torrent` SET  `status` = '1' WHERE `torrent_url` = '{torrent_id}';'''
+                DB().update(sql)
+            os.remove(torrent_file)
+        else:
+            Log().write_log(f'无匹配 - {anime_title} - 第{season}季 - 第{number_of_words}集', 'warning')
 
 
 def robot(message):
-    try:
-        requests.get(f"http://172.16.1.1:3000/send_group_msg?group_id=&message={message}")
-        time.sleep(1)
-        requests.get(f"http://172.16.1.1:3000/send_private_msg?user_id=&message={message}")
-    except Exception as e:
-        Log().write_log(e, 'error')
+    pass
+    # try:
+    #     req = requests.get(f"http://172.16.1.19:3000/send_group_msg?group_id=651936926&message={message}")
+    #     if req.status_code == 200:
+    #         if req.json()['status'] == 'ok':
+    #             Log().write_log(f"OK - {message}", 'error')
+    #     time.sleep(1)
+    #
+    #     for _ in range(3):
+    #         req = requests.get(f"http://172.16.1.19:3000/send_private_msg?user_id=498791444&message={message}")
+    #         if req.status_code == 200:
+    #             if req.json()['status'] == 'ok':
+    #                 Log().write_log(f"OK - {message}", 'error')
+    #                 break
+    #         else:
+    #             Log().write_log(f"{req.status_code} - {message}", 'error')
+    # except Exception as e:
+    #     Log().write_log(e, 'error')
 
 
 class main:
@@ -352,12 +404,15 @@ class main:
 
             if new_torrent:
                 for i in new_torrent:
-                    if 'ANi' in i:
-                        title = re.sub(r'\[.*?\]', '', i).replace(' ', '')
-                    else:
-                        anime_title = i
-
-                    anime_title = converter.convert(title)
+                    anime_title = i
+                    anime_title = (str(anime_title).replace('[ANi] ', '').replace('[1080P]', '').
+                                   replace('[Baha]', '').replace('[Nekomoe kissaten]', '').
+                                   replace('[BDRip]', '').replace('[JPSC]', '').
+                                   replace('.mp4', '').replace('[WEB-DL]', '').
+                                   replace('[AAC AVC]', '').replace('[CHT]', '').
+                                   replace('[Bilibili]', '').replace('[CHT CHS]', '').
+                                   replace('（仅限港澳台）', ''))
+                    anime_title = converter.convert(anime_title)
                     robot(f'已获取 - {anime_title}')
                     Log().write_log(f'已获取新番剧 - {anime_title}', 'info')
 
@@ -365,7 +420,7 @@ class main:
             else:
                 if len(torrent_new_list) < len(torrent_old_list):
                     torrent_old_list = torrent_new_list
-                time.sleep(10)
+                time.sleep(3)
 
     @staticmethod
     def get_Rss():
@@ -375,7 +430,9 @@ class main:
             time.sleep(stop_time)
 
 
-thread1 = threading.Thread(target=main().new_torrent)
-thread2 = threading.Thread(target=main().get_Rss)
-thread1.start()
-thread2.start()
+# thread1 = threading.Thread(target=main().new_torrent)
+# thread2 = threading.Thread(target=main().get_Rss)
+# thread1.start()
+# thread2.start()
+
+auto_download()
